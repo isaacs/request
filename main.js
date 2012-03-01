@@ -26,6 +26,7 @@ var http = require('http')
   , Cookie = require('./vendor/cookie')
   , CookieJar = require('./vendor/cookie/jar')
   , cookieJar = new CookieJar
+  , tunnel = require('./tunnel')
   ;
   
 if (process.logging) {
@@ -120,6 +121,7 @@ Request.prototype.init = function (options) {
     }
   }
 
+
   if (self.url) {
     // People use this property instead all the time so why not just support it.
     self.uri = self.url
@@ -133,7 +135,23 @@ Request.prototype.init = function (options) {
   }
   if (self.proxy) {
     if (typeof self.proxy == 'string') self.proxy = url.parse(self.proxy)
+    console.error("has proxy", self.proxy)
+    console.error("uri", self.uri)
+
+    // do the HTTP CONNECT dance using koichik/node-tunnel
+    if (http.globalAgent && self.uri.protocol === "https:") {
+      var tunnelFn = self.proxy.protocol === "http:"
+                   ? tunnel.httpsOverHttp : tunnel.httpsOverHttps
+      console.error("Doing the tunnel dance", tunnelFn.name)
+      var tunnelOptions = { proxy: { host: self.proxy.hostname
+                                   , port: +self.proxy.port } }
+
+      self.agent = tunnelFn(tunnelOptions)
+      self.tunnel = true
+    }
   }
+
+  if (options.ca) self.ca = options.ca
 
   self._redirectsFollowed = self._redirectsFollowed || 0
   self.maxRedirects = (self.maxRedirects !== undefined) ? self.maxRedirects : 10
@@ -163,7 +181,7 @@ Request.prototype.init = function (options) {
     else if (self.uri.protocol == 'https:') {self.uri.port = 443}
   }
 
-  if (self.proxy) {
+  if (self.proxy && !self.tunnel) {
     self.port = self.proxy.port
     self.host = self.proxy.hostname
   } else {
@@ -181,6 +199,7 @@ Request.prototype.init = function (options) {
     
     if (self.setHost) delete self.headers.host
     if (self.req._reusedSocket && error.code === 'ECONNRESET') {
+      console.error("start with forever agent")
       self.agent = {addRequest: ForeverAgent.prototype.addRequestNoreuse.bind(self.agent)}
       self.start()
       self.req.end()
@@ -220,7 +239,11 @@ Request.prototype.init = function (options) {
 
   if (self.path.length === 0) self.path = '/'
 
-  if (self.proxy) self.path = (self.uri.protocol + '//' + self.uri.host + self.path)
+  if (self.proxy && !self.tunnel) self.path = (self.uri.protocol + '//' + self.uri.host + self.path)
+
+  if (self.tunnel) {
+    console.error('tunneling', self.path, self.uri, self.agent)
+  }
 
   if (options.json) {
     self.json(options.json)
@@ -249,11 +272,12 @@ Request.prototype.init = function (options) {
     }
   }
 
-  var protocol = self.proxy ? self.proxy.protocol : self.uri.protocol
+  var protocol = self.proxy && !self.tunnel ? self.proxy.protocol : self.uri.protocol
     , defaultModules = {'http:':http, 'https:':https}
     , httpModules = self.httpModules || {}
     ;
   self.httpModule = httpModules[protocol] || defaultModules[protocol]
+  console.error("Got httpModule "+protocol)
 
   if (!self.httpModule) throw new Error("Invalid protocol")
 
@@ -273,6 +297,7 @@ Request.prototype.init = function (options) {
   }
 
   self.once('pipe', function (src) {
+    console.error("piped it")
     if (self.ntick) throw new Error("You cannot pipe to this stream after the first nextTick() after creation of the request stream.")
     self.src = src
     if (isReadStream(src)) {
@@ -325,6 +350,7 @@ Request.prototype.getAgent = function (host, port) {
   return this.pool[host+':'+port]
 }
 Request.prototype.start = function () {
+  console.error("req.start")
   var self = this
   
   if (self._aborted) return
@@ -333,7 +359,9 @@ Request.prototype.start = function () {
   self.method = self.method || 'GET'
   self.href = self.uri.href
   if (log) log('%method %href', self)
+  console.error("Actually making request")
   self.req = self.httpModule.request(self, function (response) {
+    console.error("back from the request", response)
     if (self._aborted) return
     if (self._paused) response.pause()
     
@@ -687,10 +715,12 @@ Request.prototype.pipe = function (dest, opts) {
   }
 }
 Request.prototype.write = function () {
+  console.error("req.write")
   if (!this._started) this.start()
   this.req.write.apply(this.req, arguments)
 }
 Request.prototype.end = function (chunk) {
+  console.error("req.end")
   if (chunk) this.write(chunk)
   if (!this._started) this.start()
   this.req.end()
